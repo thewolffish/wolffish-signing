@@ -25,7 +25,7 @@ function checkEnv() {
     console.error(
       `\n❌ Missing environment variables:\n  ${missing.join("\n  ")}`,
     );
-    console.error(`\nCopy .env.example to .env and fill in the values.`);
+    console.error(`\nCopy .env.example to .env and fill in the secure values.`);
     process.exit(1);
   }
   console.log("✅ All environment variables loaded");
