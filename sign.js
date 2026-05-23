@@ -28,6 +28,7 @@ function checkEnv() {
     console.error(`\nCopy .env.example to .env and fill in the values.`);
     process.exit(1);
   }
+  console.log("✅ All environment variables loaded");
 }
 
 function env(key) {
@@ -55,12 +56,21 @@ function ask(question) {
 
 async function findLatestReleaseWithExe(octokit) {
   console.log("\n🔍 Step 1: Finding latest GitHub release with .exe asset...");
+  console.log(`   Repo: ${env("GITHUB_OWNER")}/${env("GITHUB_REPO")}`);
 
-  const { data: releases } = await octokit.repos.listReleases({
-    owner: env("GITHUB_OWNER"),
-    repo: env("GITHUB_REPO"),
-    per_page: 10,
-  });
+  let releases;
+  try {
+    const res = await octokit.repos.listReleases({
+      owner: env("GITHUB_OWNER"),
+      repo: env("GITHUB_REPO"),
+      per_page: 10,
+    });
+    releases = res.data;
+    console.log(`   Found ${releases.length} releases`);
+  } catch (err) {
+    console.error(`\n❌ Failed to fetch releases: ${err.message}`);
+    process.exit(1);
+  }
 
   for (const release of releases) {
     const exeAsset = release.assets.find((a) => a.name.endsWith(".exe"));
@@ -70,14 +80,13 @@ async function findLatestReleaseWithExe(octokit) {
       );
       console.log(`   Asset: ${exeAsset.name} (${formatBytes(exeAsset.size)})`);
 
-      const proceed = await ask(
-        `\n   Sign this release? (y/n): `,
-      );
+      const proceed = await ask(`\n   Sign this release? (y/n): `);
       if (proceed !== "y" && proceed !== "yes") {
         console.log("\n⛔ Aborted.");
         process.exit(0);
       }
 
+      console.log("   ✅ Release selected");
       return { release, asset: exeAsset };
     }
   }
@@ -88,23 +97,31 @@ async function findLatestReleaseWithExe(octokit) {
 
 async function downloadAsset(octokit, asset) {
   console.log("\n⬇️  Step 2: Downloading .exe...");
+  console.log(`   Asset ID: ${asset.id}`);
+  console.log(`   File: ${asset.name}`);
 
   const tmpDir = path.join(import.meta.dirname, "tmp");
   fs.mkdirSync(tmpDir, { recursive: true });
   const filePath = path.join(tmpDir, asset.name);
 
-  const { data } = await octokit.repos.getReleaseAsset({
-    owner: env("GITHUB_OWNER"),
-    repo: env("GITHUB_REPO"),
-    asset_id: asset.id,
-    headers: { Accept: "application/octet-stream" },
-  });
+  try {
+    const { data } = await octokit.repos.getReleaseAsset({
+      owner: env("GITHUB_OWNER"),
+      repo: env("GITHUB_REPO"),
+      asset_id: asset.id,
+      headers: { Accept: "application/octet-stream" },
+    });
 
-  fs.writeFileSync(filePath, Buffer.from(data));
-  const size = fs.statSync(filePath).size;
-  console.log(`   Saved to: ${filePath}`);
-  console.log(`   Size: ${formatBytes(size)}`);
-  return { filePath, tmpDir };
+    fs.writeFileSync(filePath, Buffer.from(data));
+    const size = fs.statSync(filePath).size;
+    console.log(`   Saved to: ${filePath}`);
+    console.log(`   Size: ${formatBytes(size)}`);
+    console.log("   ✅ Download complete");
+    return { filePath, tmpDir };
+  } catch (err) {
+    console.error(`\n❌ Download failed: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 function signExe(filePath) {
@@ -113,16 +130,20 @@ function signExe(filePath) {
   const signtool = env("SIGNTOOL_PATH");
   const thumbprint = env("CERT_THUMBPRINT");
 
+  console.log(`   Signtool: ${signtool}`);
+  console.log(`   Thumbprint: ${thumbprint.slice(0, 8)}...`);
+  console.log(`   Timestamp: http://time.certum.pl`);
+
   const cmd = `"${signtool}" sign /sha1 "${thumbprint}" /tr http://time.certum.pl /td sha256 /fd sha256 /v "${filePath}"`;
 
-  console.log(`   Running: signtool sign ...`);
+  console.log(`   Running signtool sign...`);
 
   try {
     const output = execSync(cmd, { encoding: "utf-8", stdio: "pipe" });
-    console.log(`   ${output.trim().split("\n").pop()}`);
+    console.log(`   Output: ${output.trim().split("\n").pop()}`);
     console.log("   ✅ Signtool returned successfully");
   } catch (err) {
-    console.error(`\n❌ Signing failed:\n${err.stderr || err.message}`);
+    console.error(`\n❌ Signing failed: ${err.stderr || err.message}`);
     process.exit(1);
   }
 }
@@ -133,13 +154,15 @@ function verifySignature(filePath) {
   const signtool = env("SIGNTOOL_PATH");
   const cmd = `"${signtool}" verify /pa /all "${filePath}"`;
 
+  console.log(`   Running signtool verify...`);
+
   try {
     const output = execSync(cmd, { encoding: "utf-8", stdio: "pipe" });
-    console.log(`   ${output.trim().split("\n").pop()}`);
+    console.log(`   Output: ${output.trim().split("\n").pop()}`);
     console.log("   ✅ Signature verified");
     return true;
   } catch (err) {
-    console.error(`\n❌ Verification failed:\n${err.stderr || err.message}`);
+    console.error(`\n❌ Verification failed: ${err.stderr || err.message}`);
     return false;
   }
 }
@@ -147,31 +170,43 @@ function verifySignature(filePath) {
 async function replaceGitHubAsset(octokit, release, oldAsset, filePath) {
   console.log("\n🚀 Step 5: Uploading signed .exe to GitHub release...");
 
-  console.log(`   Deleting unsigned asset (${oldAsset.name})...`);
-  await octokit.repos.deleteReleaseAsset({
-    owner: env("GITHUB_OWNER"),
-    repo: env("GITHUB_REPO"),
-    asset_id: oldAsset.id,
-  });
+  console.log(`   Deleting unsigned asset: ${oldAsset.name} (ID: ${oldAsset.id})...`);
+  try {
+    await octokit.repos.deleteReleaseAsset({
+      owner: env("GITHUB_OWNER"),
+      repo: env("GITHUB_REPO"),
+      asset_id: oldAsset.id,
+    });
+    console.log("   ✅ Old asset deleted");
+  } catch (err) {
+    console.error(`\n❌ Failed to delete old asset: ${err.message}`);
+    process.exit(1);
+  }
 
   const fileData = fs.readFileSync(filePath);
   console.log(
     `   Uploading signed ${oldAsset.name} (${formatBytes(fileData.length)})...`,
   );
 
-  await octokit.repos.uploadReleaseAsset({
-    owner: env("GITHUB_OWNER"),
-    repo: env("GITHUB_REPO"),
-    release_id: release.id,
-    name: oldAsset.name,
-    data: fileData,
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": fileData.length,
-    },
-  });
-
-  console.log("   ✅ GitHub release updated");
+  try {
+    const { data: newAsset } = await octokit.repos.uploadReleaseAsset({
+      owner: env("GITHUB_OWNER"),
+      repo: env("GITHUB_REPO"),
+      release_id: release.id,
+      name: oldAsset.name,
+      data: fileData,
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": fileData.length,
+      },
+    });
+    console.log(`   New asset ID: ${newAsset.id}`);
+    console.log(`   Download URL: ${newAsset.browser_download_url}`);
+    console.log("   ✅ GitHub release updated");
+  } catch (err) {
+    console.error(`\n❌ Failed to upload signed asset: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 function getR2Client() {
@@ -195,19 +230,25 @@ async function uploadToR2(filePath, release) {
   const tag = release.tag_name;
   const exeKey = `${tag}/${fileName}`;
 
+  console.log(`   Endpoint: https://${env("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`);
   console.log(`   Bucket: ${bucket}`);
   console.log(`   Key: ${exeKey}`);
   console.log(`   Size: ${formatBytes(fileData.length)}`);
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: exeKey,
-      Body: fileData,
-      ContentType: "application/octet-stream",
-    }),
-  );
-  console.log("   ✅ .exe uploaded");
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: exeKey,
+        Body: fileData,
+        ContentType: "application/octet-stream",
+      }),
+    );
+    console.log("   ✅ .exe uploaded to R2");
+  } catch (err) {
+    console.error(`\n❌ R2 .exe upload failed: ${err.message}`);
+    process.exit(1);
+  }
 
   const sha512 = createHash("sha512").update(fileData).digest("base64");
   const version = tag.startsWith("v") ? tag.slice(1) : tag;
@@ -224,24 +265,33 @@ async function uploadToR2(filePath, release) {
     "",
   ].join("\n");
 
-  console.log(`   Updating latest.yml (sha512: ${sha512.slice(0, 16)}...)`);
+  console.log(`   Updating latest.yml...`);
+  console.log(`   SHA-512: ${sha512.slice(0, 24)}...`);
+  console.log(`   Version: ${version}`);
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: "latest.yml",
-      Body: latestYml,
-      ContentType: "application/yaml",
-    }),
-  );
-
-  console.log("   ✅ latest.yml updated");
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: "latest.yml",
+        Body: latestYml,
+        ContentType: "application/yaml",
+      }),
+    );
+    console.log("   ✅ latest.yml updated on R2");
+  } catch (err) {
+    console.error(`\n❌ R2 latest.yml upload failed: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 function cleanup(tmpDir) {
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch {}
+    console.log(`\n🧹 Cleaned up temp folder: ${tmpDir}`);
+  } catch (err) {
+    console.warn(`\n⚠️  Failed to clean up temp folder: ${err.message}`);
+  }
 }
 
 async function main() {
@@ -251,6 +301,7 @@ async function main() {
 
   checkEnv();
 
+  console.log("\n📡 Connecting to GitHub...");
   const octokit = new Octokit({ auth: env("GITHUB_TOKEN") });
 
   const { release, asset } = await findLatestReleaseWithExe(octokit);
@@ -265,7 +316,7 @@ async function main() {
     );
 
     if (approved !== "y" && approved !== "yes") {
-      console.log("\n⛔ Aborted. Re-run when ready to approve.");
+      console.log("\n⛔ Aborted by user. Re-run when ready to approve.");
       cleanup(tmpDir);
       process.exit(0);
     }
@@ -283,14 +334,16 @@ async function main() {
     const fileSize = fs.statSync(filePath).size;
 
     console.log("\n===========================================");
-    console.log("  ✅ Done!");
+    console.log("  ✅ All done!");
     console.log("===========================================");
     console.log(`  Release:   ${release.tag_name}`);
     console.log(`  File:      ${asset.name}`);
     console.log(`  Size:      ${formatBytes(fileSize)}`);
-    console.log(`  Signed:    Yes`);
-    console.log(`  GitHub:    Uploaded`);
-    console.log(`  R2:        Uploaded`);
+    console.log(`  Signed:    ✅ Yes`);
+    console.log(`  Verified:  ✅ Yes`);
+    console.log(`  GitHub:    ✅ Uploaded`);
+    console.log(`  R2 .exe:   ✅ Uploaded`);
+    console.log(`  R2 yml:    ✅ Updated`);
     console.log("===========================================\n");
   } finally {
     cleanup(tmpDir);
