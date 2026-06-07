@@ -242,6 +242,7 @@ async function uploadToR2(filePath, release) {
         Key: exeKey,
         Body: fileData,
         ContentType: "application/octet-stream",
+        CacheControl: "public, max-age=31536000, immutable",
       }),
     );
     console.log("   ✅ .exe uploaded to R2");
