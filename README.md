@@ -1,5 +1,5 @@
 <picture>
-  <img src="https://cdn.wolffi.sh/branding/og_image.jpg" alt="wolffish" />
+  <img src="https://cdn.wolffi.sh/general/ogimage.jpg" alt="wolffish" />
 </picture>
 
 # wolffish-signing
@@ -7,6 +7,23 @@
 **Windows code signing for Wolffish releases.**
 
 A Node.js script that automates the code signing workflow for Windows `.exe` installers using a [Certum](https://www.certum.eu/) certificate from [my-ssl.com](https://my-ssl.com/). Downloads the latest release from GitHub, signs it with `signtool`, and uploads the signed binary back to GitHub and Cloudflare R2.
+
+---
+
+## Watch
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://www.youtube.com/watch?v=MA6KkeZyFF4"><img src="https://cdn.wolffi.sh/general/Demo%20walkthrough.png" width="360" alt="Demo walkthrough" /></a>
+      <br /><b>Demo walkthrough</b>
+    </td>
+    <td align="center">
+      <a href="https://www.youtube.com/watch?v=TKdTWd6BXR8"><img src="https://cdn.wolffi.sh/general/Cinematic%20reveal.png" width="360" alt="Cinematic reveal" /></a>
+      <br /><b>Cinematic reveal</b>
+    </td>
+  </tr>
+</table>
 
 ---
 
