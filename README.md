@@ -1,5 +1,5 @@
 <picture>
-  <img src="https://cdn.wolffi.sh/general/ogimage.jpg" alt="wolffish" />
+  <img src="https://cdn.wolffi.sh/general/og_image.jpg" alt="wolffish" />
 </picture>
 
 # wolffish-signing
