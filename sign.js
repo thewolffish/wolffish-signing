@@ -54,8 +54,10 @@ function ask(question) {
   });
 }
 
-async function findLatestReleaseWithExe(octokit) {
-  console.log("\n🔍 Step 1: Finding latest GitHub release with .exe asset...");
+const MAX_VERSIONS = 5;
+
+async function selectReleaseToSign(octokit) {
+  console.log("\n🔍 Step 1: Finding recent GitHub releases with .exe assets...");
   console.log(`   Repo: ${env("GITHUB_OWNER")}/${env("GITHUB_REPO")}`);
 
   let releases;
@@ -63,7 +65,7 @@ async function findLatestReleaseWithExe(octokit) {
     const res = await octokit.repos.listReleases({
       owner: env("GITHUB_OWNER"),
       repo: env("GITHUB_REPO"),
-      per_page: 10,
+      per_page: 30,
     });
     releases = res.data;
     console.log(`   Found ${releases.length} releases`);
@@ -72,27 +74,54 @@ async function findLatestReleaseWithExe(octokit) {
     process.exit(1);
   }
 
+  // Collect up to MAX_VERSIONS most-recent releases that have an .exe asset.
+  const candidates = [];
   for (const release of releases) {
     const exeAsset = release.assets.find((a) => a.name.endsWith(".exe"));
     if (exeAsset) {
-      console.log(
-        `   Found release: ${release.tag_name} (${release.name || release.tag_name})`,
-      );
-      console.log(`   Asset: ${exeAsset.name} (${formatBytes(exeAsset.size)})`);
-
-      const proceed = await ask(`\n   Sign this release? (y/n): `);
-      if (proceed !== "y" && proceed !== "yes") {
-        console.log("\n⛔ Aborted.");
-        process.exit(0);
-      }
-
-      console.log("   ✅ Release selected");
-      return { release, asset: exeAsset };
+      candidates.push({ release, asset: exeAsset });
+      if (candidates.length === MAX_VERSIONS) break;
     }
   }
 
-  console.error("\n❌ No release found with an .exe asset.");
-  process.exit(1);
+  if (candidates.length === 0) {
+    console.error("\n❌ No release found with an .exe asset.");
+    process.exit(1);
+  }
+
+  console.log(`\n   Last ${candidates.length} release(s) with an .exe asset:`);
+  candidates.forEach(({ release, asset }, i) => {
+    const tag = release.name || release.tag_name;
+    const marker = i === 0 ? "  ← latest" : "";
+    console.log(
+      `     ${i + 1}) ${release.tag_name} (${tag}) — ${asset.name} (${formatBytes(asset.size)})${marker}`,
+    );
+  });
+
+  let choice;
+  while (true) {
+    const answer = await ask(
+      `\n   Select version to sign [1-${candidates.length}] (Enter = 1, latest): `,
+    );
+    if (answer === "") {
+      choice = 1;
+      break;
+    }
+    const n = Number(answer);
+    if (Number.isInteger(n) && n >= 1 && n <= candidates.length) {
+      choice = n;
+      break;
+    }
+    console.log(
+      `   ⚠️  Please enter a number between 1 and ${candidates.length}.`,
+    );
+  }
+
+  const selected = candidates[choice - 1];
+  console.log(
+    `\n   ✅ Selected #${choice}: ${selected.release.tag_name} — ${selected.asset.name}`,
+  );
+  return selected;
 }
 
 async function downloadAsset(octokit, asset) {
@@ -305,7 +334,7 @@ async function main() {
   console.log("\n📡 Connecting to GitHub...");
   const octokit = new Octokit({ auth: env("GITHUB_TOKEN") });
 
-  const { release, asset } = await findLatestReleaseWithExe(octokit);
+  const { release, asset } = await selectReleaseToSign(octokit);
 
   const { filePath, tmpDir } = await downloadAsset(octokit, asset);
 
