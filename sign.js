@@ -376,17 +376,23 @@ async function purgeCloudflareCache(release, fileName) {
   console.log("   ✅ Edge cache purged");
 }
 
-// Confirm the public URL (post-purge) actually serves the signed build. The
-// signed and unsigned binaries differ in size (the Authenticode signature adds
-// a few KB), so a size match off a tiny range request is a cheap, decisive
-// check — no need to re-download the whole installer. Purges propagate in
-// seconds, so retry briefly before giving up.
+// Best-effort confirmation that the public URL (post-purge) serves the signed
+// build. The signed and unsigned binaries differ in size (the Authenticode
+// signature adds a few KB), so a size match off a tiny range request is cheap
+// and decisive — no need to re-download the whole installer.
+//
+// This is NOT a gate: by the time we reach here the release is already complete
+// — GitHub asset replaced, R2 origin updated, latest.yml rewritten, cache
+// purged. If the edge hasn't refetched within the wait window that's almost
+// always purge-propagation lag, not a broken release, so we warn and return
+// false rather than failing the whole run. Returns true once the signed size is
+// served. (A genuine purge-API rejection already hard-fails in the step above.)
 async function verifyServedArtifact(release, fileName, expectedSize) {
   console.log(
     "\n🔎 Step 8: Verifying the public URL serves the signed build...",
   );
   const exeUrl = `${RELEASES_URL}/${release.tag_name}/${fileName}`;
-  const MAX_ATTEMPTS = 5;
+  const MAX_ATTEMPTS = 8;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -408,22 +414,32 @@ async function verifyServedArtifact(release, fileName, expectedSize) {
       );
       if (total === expectedSize) {
         console.log("   ✅ Public URL now serves the signed artifact");
-        return;
+        return true;
       }
-      console.log("   ⚠️  Stale copy still cached — waiting for purge to propagate...");
+      console.log(
+        "   ⏳ Stale copy still cached — waiting for the purge to propagate...",
+      );
     } catch (err) {
-      console.log(`   ⚠️  Verify attempt ${attempt} failed: ${err.message}`);
+      console.log(`   ⏳ Verify attempt ${attempt} failed: ${err.message}`);
     }
-    if (attempt < MAX_ATTEMPTS) await sleep(3000 * attempt);
+    if (attempt < MAX_ATTEMPTS) await sleep(Math.min(3000 * attempt, 8000));
   }
 
-  console.error(
-    "\n❌ Public URL is still not serving the signed build after purge.",
+  // Not a failure: the signed file is already on R2 origin and the cache was
+  // purged successfully — Cloudflare edges just haven't all refetched yet.
+  console.warn(
+    "\n⚠️  Couldn't confirm the signed build at the edge within the wait window.",
   );
-  console.error(
-    "   Check the Cloudflare zone/token and that the exe URL is correct, then purge manually.",
+  console.warn(
+    "   This is almost always purge-propagation lag, not a broken release — the",
   );
-  process.exit(1);
+  console.warn(
+    "   signed file is on R2 and the cache was purged. Re-check shortly with:",
+  );
+  console.warn(
+    `   curl -sIL ${exeUrl} | grep -i content-length   # expect ${expectedSize}`,
+  );
+  return false;
 }
 
 function cleanup(tmpDir) {
@@ -472,7 +488,7 @@ async function main() {
     await replaceGitHubAsset(octokit, release, asset, filePath);
     const { size } = await uploadToR2(filePath, release);
     await purgeCloudflareCache(release, asset.name);
-    await verifyServedArtifact(release, asset.name, size);
+    const servedSigned = await verifyServedArtifact(release, asset.name, size);
 
     const fileSize = fs.statSync(filePath).size;
 
@@ -487,7 +503,11 @@ async function main() {
     console.log(`  GitHub:    ✅ Uploaded`);
     console.log(`  R2 .exe:   ✅ Uploaded`);
     console.log(`  R2 yml:    ✅ Updated`);
-    console.log(`  CF purge:  ✅ Purged & served`);
+    console.log(
+      servedSigned
+        ? `  CF purge:  ✅ Purged & verified at edge`
+        : `  CF purge:  ✅ Purged (edge still propagating — re-check shortly)`,
+    );
     console.log("===========================================\n");
   } finally {
     cleanup(tmpDir);
