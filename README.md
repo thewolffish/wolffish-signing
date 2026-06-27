@@ -56,7 +56,11 @@ R2_ACCOUNT_ID=your_cloudflare_account_id
 R2_ACCESS_KEY_ID=your_r2_access_key
 R2_SECRET_ACCESS_KEY=your_r2_secret_key
 R2_BUCKET_NAME=your_bucket_name
+CF_ZONE_ID=your_cloudflare_zone_id
+CF_API_TOKEN=your_cloudflare_cache_purge_token
 ```
+
+> `CF_API_TOKEN` only needs the **Zone → Cache Purge** permission on the `wolffi.sh` zone. After uploading the signed `.exe`, the script purges the Cloudflare edge cache for the artifact + `latest.yml` — otherwise the CDN keeps serving the stale **unsigned** copy CI cached as `immutable`, and the auto-updater rejects it with a `sha512 checksum mismatch`.
 
 ---
 
@@ -75,6 +79,8 @@ The script will:
 5. Verify the signature
 6. Replace the `.exe` on the GitHub release with the signed version
 7. Upload the signed `.exe` and `latest.yml` to Cloudflare R2
+8. Purge the Cloudflare edge cache for the artifact and `latest.yml`
+9. Verify the public URL now serves the signed build (by size)
 
 ---
 

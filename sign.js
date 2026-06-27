@@ -17,7 +17,17 @@ const REQUIRED_ENV = [
   "R2_ACCESS_KEY_ID",
   "R2_SECRET_ACCESS_KEY",
   "R2_BUCKET_NAME",
+  "CF_ZONE_ID",
+  "CF_API_TOKEN",
 ];
+
+// Public origin (Cloudflare custom domain) that fronts the R2 bucket. Downloads
+// and the auto-updater hit this URL, not R2 directly. CI uploads each build's
+// .exe with `Cache-Control: immutable, max-age=1y`, so once Cloudflare's edge
+// caches the unsigned CI copy it will NOT pick up the signed file we overwrite
+// the same key with — we must explicitly purge it here. Keep in sync with
+// RELEASES_URL in the app's updater.
+const RELEASES_URL = "https://releases.wolffi.sh";
 
 function checkEnv() {
   const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
@@ -52,6 +62,10 @@ function ask(question) {
       resolve(answer.trim().toLowerCase());
     });
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const MAX_VERSIONS = 5;
@@ -313,6 +327,103 @@ async function uploadToR2(filePath, release) {
     console.error(`\n❌ R2 latest.yml upload failed: ${err.message}`);
     process.exit(1);
   }
+
+  return { sha512, size: fileData.length };
+}
+
+async function purgeCloudflareCache(release, fileName) {
+  console.log("\n🧹 Step 7: Purging Cloudflare cache for the signed artifact...");
+
+  const zoneId = env("CF_ZONE_ID");
+  const token = env("CF_API_TOKEN");
+  const exeUrl = `${RELEASES_URL}/${release.tag_name}/${fileName}`;
+  const ymlUrl = `${RELEASES_URL}/latest.yml`;
+  const files = [exeUrl, ymlUrl];
+
+  console.log(`   Zone: ${zoneId.slice(0, 8)}...`);
+  files.forEach((f) => console.log(`   Purging: ${f}`));
+
+  let res;
+  try {
+    res = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ files }),
+      },
+    );
+  } catch (err) {
+    console.error(`\n❌ Cloudflare purge request failed: ${err.message}`);
+    process.exit(1);
+  }
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.success) {
+    const detail =
+      (body.errors || []).map((e) => e.message).join("; ") ||
+      `HTTP ${res.status}`;
+    console.error(`\n❌ Cloudflare purge rejected: ${detail}`);
+    console.error(
+      "   The signed file is on R2, but the edge may still serve the stale unsigned copy.",
+    );
+    process.exit(1);
+  }
+
+  console.log("   ✅ Edge cache purged");
+}
+
+// Confirm the public URL (post-purge) actually serves the signed build. The
+// signed and unsigned binaries differ in size (the Authenticode signature adds
+// a few KB), so a size match off a tiny range request is a cheap, decisive
+// check — no need to re-download the whole installer. Purges propagate in
+// seconds, so retry briefly before giving up.
+async function verifyServedArtifact(release, fileName, expectedSize) {
+  console.log(
+    "\n🔎 Step 8: Verifying the public URL serves the signed build...",
+  );
+  const exeUrl = `${RELEASES_URL}/${release.tag_name}/${fileName}`;
+  const MAX_ATTEMPTS = 5;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(exeUrl, { headers: { Range: "bytes=0-0" } });
+      const contentRange = res.headers.get("content-range");
+      // 206 → ".../<total>"; if the edge ignores Range and returns 200, fall
+      // back to Content-Length (the full size). Never read the body.
+      const total = contentRange
+        ? Number(contentRange.split("/")[1] || 0)
+        : Number(res.headers.get("content-length") || 0);
+      const cache = res.headers.get("cf-cache-status") || "unknown";
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* nothing to drain */
+      }
+      console.log(
+        `   Attempt ${attempt}/${MAX_ATTEMPTS}: served size ${total}, signed size ${expectedSize}, cf-cache-status ${cache}`,
+      );
+      if (total === expectedSize) {
+        console.log("   ✅ Public URL now serves the signed artifact");
+        return;
+      }
+      console.log("   ⚠️  Stale copy still cached — waiting for purge to propagate...");
+    } catch (err) {
+      console.log(`   ⚠️  Verify attempt ${attempt} failed: ${err.message}`);
+    }
+    if (attempt < MAX_ATTEMPTS) await sleep(3000 * attempt);
+  }
+
+  console.error(
+    "\n❌ Public URL is still not serving the signed build after purge.",
+  );
+  console.error(
+    "   Check the Cloudflare zone/token and that the exe URL is correct, then purge manually.",
+  );
+  process.exit(1);
 }
 
 function cleanup(tmpDir) {
@@ -359,7 +470,9 @@ async function main() {
     }
 
     await replaceGitHubAsset(octokit, release, asset, filePath);
-    await uploadToR2(filePath, release);
+    const { size } = await uploadToR2(filePath, release);
+    await purgeCloudflareCache(release, asset.name);
+    await verifyServedArtifact(release, asset.name, size);
 
     const fileSize = fs.statSync(filePath).size;
 
@@ -374,6 +487,7 @@ async function main() {
     console.log(`  GitHub:    ✅ Uploaded`);
     console.log(`  R2 .exe:   ✅ Uploaded`);
     console.log(`  R2 yml:    ✅ Updated`);
+    console.log(`  CF purge:  ✅ Purged & served`);
     console.log("===========================================\n");
   } finally {
     cleanup(tmpDir);
