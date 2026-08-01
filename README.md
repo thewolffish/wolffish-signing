@@ -1,5 +1,5 @@
 <picture>
-  <img src="https://cdn.wolffi.sh/general/og_image.jpg" alt="wolffish" />
+  <img src="https://cdn.wolffi.sh/generic/banner.jpg" alt="wolffish" />
 </picture>
 
 # wolffish-signing
@@ -15,15 +15,15 @@ A Node.js script that automates the code signing workflow for Windows `.exe` ins
 <table>
   <tr>
     <td align="center">
-      <a href="https://www.youtube.com/watch?v=oog1q7T8H-s"><img src="https://cdn.wolffi.sh/general/Demo%20walkthrough.png" width="360" alt="Demo walkthrough" /></a>
+      <a href="https://www.youtube.com/watch?v=oog1q7T8H-s"><img src="https://cdn.wolffi.sh/generic/demo_walkthrough.jpg" width="360" alt="Demo walkthrough" /></a>
       <br /><b>Demo walkthrough</b>
     </td>
     <td align="center">
-      <a href="https://www.youtube.com/watch?v=XZdBttn-99E"><img src="https://cdn.wolffi.sh/general/wolffish.jpg" width="360" alt="Cinematic launch" /></a>
+      <a href="https://www.youtube.com/watch?v=XZdBttn-99E"><img src="https://cdn.wolffi.sh/generic/cinematic_launch.jpg" width="360" alt="Cinematic launch" /></a>
       <br /><b>Cinematic launch</b>
     </td>
     <td align="center">
-      <a href="https://www.youtube.com/watch?v=TKdTWd6BXR8"><img src="https://cdn.wolffi.sh/general/Cinematic%20reveal.png" width="360" alt="Cinematic reveal" /></a>
+      <a href="https://www.youtube.com/watch?v=TKdTWd6BXR8"><img src="https://cdn.wolffi.sh/generic/cinematic_reveal.jpg" width="360" alt="Cinematic reveal" /></a>
       <br /><b>Cinematic reveal</b>
     </td>
   </tr>
