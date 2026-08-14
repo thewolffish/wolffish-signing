@@ -135,7 +135,17 @@ async function selectReleaseToSign(octokit) {
   console.log(
     `\n   ✅ Selected #${choice}: ${selected.release.tag_name} — ${selected.asset.name}`,
   );
-  return selected;
+  // Candidates are newest-first, so only #1 may rewrite latest.yml — see
+  // uploadToR2. Signing an older build must never move the updater backwards.
+  return { ...selected, isLatest: choice === 1 };
+}
+
+// Any failure after signing is resumable from the local file: recover.js picks
+// up at Step 5, so there's no second SimplySign approval.
+function resumeHint(tag, filePath) {
+  console.error(`\n   Signed file kept at: ${filePath}`);
+  console.error(`   Resume without re-signing:`);
+  console.error(`   npm run recover -- ${tag} "${filePath}"`);
 }
 
 async function downloadAsset(octokit, asset) {
@@ -210,44 +220,119 @@ function verifySignature(filePath) {
   }
 }
 
+// GitHub won't hold two assets with the same name, so the signed build goes up
+// under a temporary name and is renamed into place only once the unsigned
+// original is gone. The release therefore lacks its installer for the duration
+// of one metadata call instead of a multi-minute upload — and a failed upload
+// now leaves the unsigned asset untouched rather than leaving the release empty.
+const INCOMING_SUFFIX = ".incoming";
+const UPLOAD_ATTEMPTS = 4;
+
 async function replaceGitHubAsset(octokit, release, oldAsset, filePath) {
   console.log("\n🚀 Step 5: Uploading signed .exe to GitHub release...");
 
-  console.log(`   Deleting unsigned asset: ${oldAsset.name} (ID: ${oldAsset.id})...`);
-  try {
-    await octokit.repos.deleteReleaseAsset({
-      owner: env("GITHUB_OWNER"),
-      repo: env("GITHUB_REPO"),
-      asset_id: oldAsset.id,
+  const owner = env("GITHUB_OWNER");
+  const repo = env("GITHUB_REPO");
+  const fileData = fs.readFileSync(filePath);
+  const finalName = oldAsset.name;
+  const incomingName = `${finalName}${INCOMING_SUFFIX}`;
+
+  const currentAssets = async () => {
+    const { data } = await octokit.repos.getRelease({
+      owner,
+      repo,
+      release_id: release.id,
     });
-    console.log("   ✅ Old asset deleted");
-  } catch (err) {
-    console.error(`\n❌ Failed to delete old asset: ${err.message}`);
-    process.exit(1);
+    return data.assets;
+  };
+  const deleteAsset = (asset) =>
+    octokit.repos.deleteReleaseAsset({ owner, repo, asset_id: asset.id });
+
+  // An earlier failed run may have left an .incoming behind, which would make
+  // this upload a duplicate-name rejection.
+  const stale = (await currentAssets()).find((a) => a.name === incomingName);
+  if (stale) {
+    console.log(`   Clearing stale ${incomingName} from an earlier run...`);
+    await deleteAsset(stale);
   }
 
-  const fileData = fs.readFileSync(filePath);
   console.log(
-    `   Uploading signed ${oldAsset.name} (${formatBytes(fileData.length)})...`,
+    `   Uploading signed ${finalName} (${formatBytes(fileData.length)}) as ${incomingName}...`,
   );
 
+  let uploaded = null;
+  for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS && !uploaded; attempt++) {
+    try {
+      const { data } = await octokit.repos.uploadReleaseAsset({
+        owner,
+        repo,
+        release_id: release.id,
+        name: incomingName,
+        data: fileData,
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-length": fileData.length,
+        },
+      });
+      uploaded = data;
+    } catch (err) {
+      console.log(
+        `   ⚠️  Attempt ${attempt}/${UPLOAD_ATTEMPTS} failed: ${err.message}`,
+      );
+      // A client-side timeout on a request GitHub actually completed is
+      // indistinguishable from a real failure, so ask the API before retrying.
+      const present = (await currentAssets().catch(() => [])).find(
+        (a) => a.name === incomingName,
+      );
+      if (present && present.size === fileData.length) {
+        console.log("   ✅ Upload had in fact completed server-side");
+        uploaded = present;
+        break;
+      }
+      if (present) await deleteAsset(present).catch(() => {});
+      if (attempt === UPLOAD_ATTEMPTS) {
+        console.error(
+          `\n❌ Failed to upload signed asset after ${UPLOAD_ATTEMPTS} attempts.`,
+        );
+        console.error(`   The unsigned asset is untouched — nothing was lost.`);
+        resumeHint(release.tag_name, filePath);
+        process.exit(1);
+      }
+      await sleep(Math.min(5000 * attempt, 20000));
+    }
+  }
+  console.log(`   Uploaded as ${incomingName} (ID: ${uploaded.id})`);
+
+  console.log(`   Deleting unsigned asset: ${finalName} (ID: ${oldAsset.id})...`);
   try {
-    const { data: newAsset } = await octokit.repos.uploadReleaseAsset({
-      owner: env("GITHUB_OWNER"),
-      repo: env("GITHUB_REPO"),
-      release_id: release.id,
-      name: oldAsset.name,
-      data: fileData,
-      headers: {
-        "content-type": "application/octet-stream",
-        "content-length": fileData.length,
-      },
+    await deleteAsset(oldAsset);
+    console.log("   ✅ Old asset deleted");
+  } catch (err) {
+    if (err.status === 404) {
+      console.log("   ✅ Old asset was already gone");
+    } else {
+      console.error(`\n❌ Failed to delete old asset: ${err.message}`);
+      console.error(`   The signed build is on the release as ${incomingName}.`);
+      resumeHint(release.tag_name, filePath);
+      process.exit(1);
+    }
+  }
+
+  console.log(`   Renaming ${incomingName} → ${finalName}...`);
+  try {
+    const { data: renamed } = await octokit.repos.updateReleaseAsset({
+      owner,
+      repo,
+      asset_id: uploaded.id,
+      name: finalName,
     });
-    console.log(`   New asset ID: ${newAsset.id}`);
-    console.log(`   Download URL: ${newAsset.browser_download_url}`);
+    console.log(`   New asset ID: ${renamed.id}`);
+    console.log(`   Download URL: ${renamed.browser_download_url}`);
     console.log("   ✅ GitHub release updated");
   } catch (err) {
-    console.error(`\n❌ Failed to upload signed asset: ${err.message}`);
+    console.error(`\n❌ Failed to rename asset into place: ${err.message}`);
+    console.error(`   The signed build IS on the release, as ${incomingName}.`);
+    resumeHint(release.tag_name, filePath);
     process.exit(1);
   }
 }
@@ -263,7 +348,7 @@ function getR2Client() {
   });
 }
 
-async function uploadToR2(filePath, release) {
+async function uploadToR2(filePath, release, updateLatest) {
   console.log("\n☁️  Step 6: Uploading signed .exe to Cloudflare R2...");
 
   const s3 = getR2Client();
@@ -291,11 +376,19 @@ async function uploadToR2(filePath, release) {
     console.log("   ✅ .exe uploaded to R2");
   } catch (err) {
     console.error(`\n❌ R2 .exe upload failed: ${err.message}`);
+    resumeHint(tag, filePath);
     process.exit(1);
   }
 
   const sha512 = createHash("sha512").update(fileData).digest("base64");
   const version = tag.startsWith("v") ? tag.slice(1) : tag;
+
+  // latest.yml is what every auto-updater reads. Writing it for anything but
+  // the newest release points the whole install base backwards.
+  if (!updateLatest) {
+    console.log(`   ⏭️  Skipped latest.yml — ${tag} is not the newest release`);
+    return { sha512, size: fileData.length };
+  }
 
   const latestYml = [
     `version: ${version}`,
@@ -325,6 +418,7 @@ async function uploadToR2(filePath, release) {
     console.log("   ✅ latest.yml updated on R2");
   } catch (err) {
     console.error(`\n❌ R2 latest.yml upload failed: ${err.message}`);
+    resumeHint(tag, filePath);
     process.exit(1);
   }
 
@@ -461,7 +555,7 @@ async function main() {
   console.log("\n📡 Connecting to GitHub...");
   const octokit = new Octokit({ auth: env("GITHUB_TOKEN") });
 
-  const { release, asset } = await selectReleaseToSign(octokit);
+  const { release, asset, isLatest } = await selectReleaseToSign(octokit);
 
   const { filePath, tmpDir } = await downloadAsset(octokit, asset);
 
@@ -486,7 +580,20 @@ async function main() {
     }
 
     await replaceGitHubAsset(octokit, release, asset, filePath);
-    const { size } = await uploadToR2(filePath, release);
+
+    let updateLatest = isLatest;
+    if (!isLatest) {
+      console.log(
+        `\n⚠️  ${release.tag_name} is NOT the newest release. Writing latest.yml`,
+      );
+      console.log(
+        `   would point every auto-updater back to this older version.`,
+      );
+      const answer = await ask("   Update latest.yml anyway? (y/n): ");
+      updateLatest = answer === "y" || answer === "yes";
+    }
+
+    const { size } = await uploadToR2(filePath, release, updateLatest);
     await purgeCloudflareCache(release, asset.name);
     const servedSigned = await verifyServedArtifact(release, asset.name, size);
 
@@ -502,16 +609,27 @@ async function main() {
     console.log(`  Verified:  ✅ Yes`);
     console.log(`  GitHub:    ✅ Uploaded`);
     console.log(`  R2 .exe:   ✅ Uploaded`);
-    console.log(`  R2 yml:    ✅ Updated`);
+    console.log(
+      updateLatest
+        ? `  R2 yml:    ✅ Updated`
+        : `  R2 yml:    ⏭️  Skipped (not the newest release)`,
+    );
     console.log(
       servedSigned
         ? `  CF purge:  ✅ Purged & verified at edge`
         : `  CF purge:  ✅ Purged (edge still propagating — re-check shortly)`,
     );
     console.log("===========================================\n");
-  } finally {
-    cleanup(tmpDir);
+  } catch (err) {
+    // Deliberately do NOT clean up: the signed .exe is the one thing that can't
+    // be reproduced without another SimplySign approval, so it stays on disk
+    // for recover.js. Cleanup happens only on the success path below.
+    console.error(`\n⛔ Run failed after signing — temp folder kept.`);
+    resumeHint(release.tag_name, filePath);
+    throw err;
   }
+
+  cleanup(tmpDir);
 }
 
 main().catch((err) => {
