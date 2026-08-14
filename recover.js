@@ -16,6 +16,7 @@
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { Octokit } from "@octokit/rest";
 import "dotenv/config";
+import { uploadReleaseAsset } from "./github-upload.js";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -324,11 +325,11 @@ async function uploadGitHubAsset(octokit, release, filePath) {
   console.log("\n🚀 Step 3: Uploading signed .exe to the GitHub release...");
 
   const fileName = path.basename(filePath);
-  const fileData = fs.readFileSync(filePath);
+  const fileSize = fs.statSync(filePath).size;
 
   const existing = release.assets.find((a) => a.name === fileName);
   if (existing) {
-    if (existing.size === fileData.length) {
+    if (existing.size === fileSize) {
       console.log(
         `   ✅ Signed asset already present (${formatBytes(existing.size)}) — skipping`,
       );
@@ -345,22 +346,18 @@ async function uploadGitHubAsset(octokit, release, filePath) {
     console.log("   ✅ Stale asset deleted");
   }
 
-  console.log(`   Uploading ${fileName} (${formatBytes(fileData.length)})...`);
+  console.log(`   Uploading ${fileName} (${formatBytes(fileSize)})...`);
 
   const MAX_ATTEMPTS = 4;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const { data: newAsset } = await octokit.repos.uploadReleaseAsset({
+      const newAsset = await uploadReleaseAsset({
         owner: env("GITHUB_OWNER"),
         repo: env("GITHUB_REPO"),
-        release_id: release.id,
+        releaseId: release.id,
         name: fileName,
-        data: fileData,
-        headers: {
-          "content-type": "application/octet-stream",
-          "content-length": fileData.length,
-        },
-        request: { timeout: 15 * 60 * 1000 },
+        filePath,
+        token: env("GITHUB_TOKEN"),
       });
       console.log(`   New asset ID: ${newAsset.id}`);
       console.log(`   Download URL: ${newAsset.browser_download_url}`);

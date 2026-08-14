@@ -1,6 +1,7 @@
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { Octokit } from "@octokit/rest";
 import "dotenv/config";
+import { uploadReleaseAsset } from "./github-upload.js";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -233,7 +234,7 @@ async function replaceGitHubAsset(octokit, release, oldAsset, filePath) {
 
   const owner = env("GITHUB_OWNER");
   const repo = env("GITHUB_REPO");
-  const fileData = fs.readFileSync(filePath);
+  const fileSize = fs.statSync(filePath).size;
   const finalName = oldAsset.name;
   const incomingName = `${finalName}${INCOMING_SUFFIX}`;
 
@@ -257,24 +258,20 @@ async function replaceGitHubAsset(octokit, release, oldAsset, filePath) {
   }
 
   console.log(
-    `   Uploading signed ${finalName} (${formatBytes(fileData.length)}) as ${incomingName}...`,
+    `   Uploading signed ${finalName} (${formatBytes(fileSize)}) as ${incomingName}...`,
   );
 
   let uploaded = null;
   for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS && !uploaded; attempt++) {
     try {
-      const { data } = await octokit.repos.uploadReleaseAsset({
+      uploaded = await uploadReleaseAsset({
         owner,
         repo,
-        release_id: release.id,
+        releaseId: release.id,
         name: incomingName,
-        data: fileData,
-        headers: {
-          "content-type": "application/octet-stream",
-          "content-length": fileData.length,
-        },
+        filePath,
+        token: env("GITHUB_TOKEN"),
       });
-      uploaded = data;
     } catch (err) {
       console.log(
         `   ⚠️  Attempt ${attempt}/${UPLOAD_ATTEMPTS} failed: ${err.message}`,
@@ -284,7 +281,7 @@ async function replaceGitHubAsset(octokit, release, oldAsset, filePath) {
       const present = (await currentAssets().catch(() => [])).find(
         (a) => a.name === incomingName,
       );
-      if (present && present.size === fileData.length) {
+      if (present && present.size === fileSize) {
         console.log("   ✅ Upload had in fact completed server-side");
         uploaded = present;
         break;
